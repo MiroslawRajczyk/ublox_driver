@@ -1,55 +1,14 @@
-/*
- * Scorpio 2024
- */
-
-#include <condition_variable>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <fstream>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <vector>
-
-#include <fcntl.h>
-#include <errno.h>
-#include <termios.h>
-#include <unistd.h>
+#include "../include/ubloxRtcmDriver.hpp"
 
 // Vector of messages that we filter out from ublox connected via USB, to be filled in later
 std::vector<uint16_t> rtcmMsgIds = {
     1005  // 0x3E 0xD0
 };
 
-class RTCM3
+auto main(int argc, char** argv) -> int
 {
-public:
-    explicit RTCM3() = default;
-
-    void set_1005(const std::vector<uint8_t>& bufor)
-    {
-        std::lock_guard<std::mutex> lock(m);
-        data_1005 = bufor;
-        c.notify_one();
-    }
-
-    std::vector<uint8_t> get_1005() const
-    {
-        std::unique_lock<std::mutex> lock(m);
-        c.wait(lock);
-        return data_1005;
-    }
-
-private:
-    std::vector<uint8_t> data_1005;
-    mutable std::mutex m;
-    mutable std::condition_variable c;
-};
-
-auto main(int agrc, char** argv) -> int
-{
-    printf("Dupsko\r\n");
+    ros::init(argc, argv, "drive_driver");
+    ROS_INFO("Dupsko");
 
     int serial_port = open("/dev/ttyACM0", O_RDWR);
 
@@ -97,7 +56,7 @@ auto main(int agrc, char** argv) -> int
         return -1;
     }
 
-    RTCM3 rtcm3_msgs;
+    UbloxRtcmDriver rtcm3_msgs;
 
     auto usb_thread = std::thread([&] {
         std::vector<uint8_t> bufor(250, 0xFF);
