@@ -4,7 +4,6 @@ project(ublox_driver)
 find_package(catkin REQUIRED COMPONENTS
   rospy
   roscpp
-  tools
   std_msgs
   rostest
   code_coverage
@@ -23,11 +22,6 @@ include_directories(
 add_executable(ublox_driver
   src/main.cpp
 )
-add_dependencies(ublox_driver
-  tools_generate_messages_cpp
-  tools_generate_messages
-  tools_generate_messages_py
-  tools_generate_messages_lisp)
 target_link_libraries(ublox_driver ${catkin_LIBRARIES})
 
 install(DIRECTORY config/

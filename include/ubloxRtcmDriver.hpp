@@ -18,7 +18,13 @@
 class UbloxRtcmDriver
 {
 public:
+    int _serial_port = -1;
+
     explicit UbloxRtcmDriver() = default;
+    bool close_serial_port();
+    ~UbloxRtcmDriver();
+
+    int initialize_serial_port(const std::string port);
 
     void set_1005(const std::vector<uint8_t>& bufor)
     {
@@ -33,7 +39,6 @@ public:
         c.wait(lock);
         return data_1005;
     }
-
 private:
     std::vector<uint8_t> data_1005;
     mutable std::mutex m;
