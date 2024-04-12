@@ -1,4 +1,7 @@
 #include "../include/ubloxRtcmDriver.hpp"
+#include <rtcm_msgs/Message.h>
+#include <sensor_msgs/NavSatFix.h>
+#include <std_msgs/UInt8.h>
 
 UbloxRtcmDriver::~UbloxRtcmDriver() {
     close_serial_port();
@@ -55,76 +58,136 @@ int UbloxRtcmDriver::initialize_serial_port(const std::string port) {
     }
 }
 
-// Vector of messages that we filter out from ublox connected via USB, to be filled in later
-std::vector<uint16_t> rtcmMsgIds = {
-    1005  // 0x3E 0xD0
-};
-
-auto main(int argc, char** argv) -> int
-{
-    ros::init(argc, argv, "ublox_driver");
+auto main(int argc, char** argv) -> int {
+    ros::init(argc, argv, "ublox_rtk_base_driver");
     ROS_INFO("Started ublox rtcm driver node.");
 
     UbloxRtcmDriver rtcm_reader;
-    rtcm_reader.initialize_serial_port("/dev/ttyACM0");
+    rtcm_reader.initialize_serial_port("/dev/ttyACM1");
 
     auto usb_thread = std::thread([&] {
-        std::vector<uint8_t> bufor(250, 0xFF);
-        while (true)
-        {
+        ros::NodeHandle nh = ros::NodeHandle("ublox_rtk_base_driver");
+        ros::Publisher fixPublisher = nh.advertise<sensor_msgs::NavSatFix>("fix", 1, true);
+        ros::Publisher satellitesNumberPublisher = nh.advertise<std_msgs::UInt8>("satellites_number", 1, true);
+        std::vector<uint8_t> bufor(1250, 0xFF);
+        while (ros::ok()) {
             int num_bytes = read(rtcm_reader._serial_port, bufor.data(), 250);
-            ROS_INFO("Received frame with %i bytes.", num_bytes);
-            if (num_bytes < 0)
-            {
-                ROS_ERROR("Error reading frame: %s", strerror(errno));
-                return -1;
-            }
-
-            //for (const auto& byte : bufor)
-            //{
-            //    printf("%x ", byte);
-            //}
-            //printf("\r\n");
-
-            if (num_bytes < 5)
-            {
+            if (num_bytes < 5) {
+                ROS_WARN("Error reading frame");
                 continue;
             }
 
-            if (bufor[0] == 0xd3 && bufor[3] == 0x3e && bufor[4] == 0xd0) // fuszerka ostra potem poprawic
-            {
-                ROS_INFO("Found RTCM3 frame in buffer");
-                rtcm_reader.set_1005(
-                    std::vector<uint8_t>(bufor.begin(), bufor.begin() + num_bytes)
-                );
-            }
+            if (rtcm_reader.is_nav_pvt_message(bufor)) {
+                if (num_bytes < 36) {
+                    ROS_ERROR("Invalid NAV-PVT message: Data size is less than expected.");
+                    continue;
+                } else {
+                    // Extract fields from the message
+                    rtcm_reader.gpsData.iTOW = (bufor[9] << 24) | (bufor[8] << 16) | (bufor[7] << 8) | bufor[6];
+                    rtcm_reader.gpsData.year = (bufor[11] << 8) | bufor[10];
+                    rtcm_reader.gpsData.month = bufor[12];
+                    rtcm_reader.gpsData.day = bufor[13];
+                    rtcm_reader.gpsData.hour = bufor[14];
+                    rtcm_reader.gpsData.min = bufor[15];
+                    rtcm_reader.gpsData.sec = bufor[16];
+                    rtcm_reader.gpsData.valid = bufor[17];
+                    rtcm_reader.gpsData.tAcc = (bufor[21] << 24) | (bufor[20] << 16) | (bufor[19] << 8) | bufor[18]; // in ns
+                    rtcm_reader.gpsData.fixType = bufor[26]; // 0 - no fix, 1 - dead reckoning only, 2 - 2D-fix, 3 - 3D-fix, 4 - GNSS + dead reckoning, 5 - time only fix
+                    rtcm_reader.gpsData.numSV = bufor[29]; // number of satellites used in Nav Solution
+                    rtcm_reader.gpsData.lon = (bufor[33] << 24) | (bufor[32] << 16) | (bufor[31] << 8) | bufor[30]; // scale by 1e-7, in deg
+                    rtcm_reader.gpsData.lat = (bufor[37] << 24) | (bufor[36] << 16) | (bufor[35] << 8) | bufor[34]; // scale by 1e-7, in deg
+                    rtcm_reader.gpsData.height = (bufor[41] << 24) | (bufor[40] << 16) | (bufor[39] << 8) | bufor[38]; // in mm
+                    rtcm_reader.gpsData.hMSL = (bufor[45] << 24) | (bufor[44] << 16) | (bufor[43] << 8) | bufor[42]; // in mm
+                    rtcm_reader.gpsData.hAcc = (bufor[49] << 24) | (bufor[48] << 16) | (bufor[47] << 8) | bufor[46]; // in mm
+                    rtcm_reader.gpsData.vAcc = (bufor[53] << 24) | (bufor[52] << 16) | (bufor[51] << 8) | bufor[50]; // in mm
+                    rtcm_reader.gpsData.pDOP = (bufor[83] << 8) | bufor[82];
+                    rtcm_reader.gpsData.magDec = (bufor[95] << 8) | bufor[94]; // in deg
+                    rtcm_reader.gpsData.magDecAcc = (bufor[97] << 8) | bufor[96]; // in mm
 
+                    sensor_msgs::NavSatFix fixMsg;
+                    fixMsg.header.stamp = ros::Time::now();  // Timestamp
+                    fixMsg.header.frame_id = "map";
+                    if (rtcm_reader.gpsData.fixType == 0) {
+                        fixMsg.status.status = -1;
+                    } else {
+                        fixMsg.status.status = 0;
+                    }
+                    fixMsg.status.service = 1;
+                    fixMsg.latitude = rtcm_reader.gpsData.lat / 10000000.0;
+                    fixMsg.longitude = rtcm_reader.gpsData.lon / 10000000.0;
+                    fixMsg.altitude = rtcm_reader.gpsData.hMSL / 1000;
+                    fixMsg.position_covariance_type = 2; // DIAGONAL_KNOWN
+                    const double varH = pow(rtcm_reader.gpsData.hAcc / 10000.0, 2);
+                    const double varV = pow(rtcm_reader.gpsData.vAcc / 10000.0, 2);
+                    fixMsg.position_covariance[0] = varH;
+                    fixMsg.position_covariance[4] = varH;
+                    fixMsg.position_covariance[8] = varV;
+                    fixPublisher.publish(fixMsg);
+                    std_msgs::UInt8 satNumMsg;
+                    satNumMsg.data = rtcm_reader.gpsData.numSV;
+                    satellitesNumberPublisher.publish(satNumMsg);
+
+                    // Output parsed data
+                    //ROS_INFO("iTOW: %u", rtcm_reader.gpsData.iTOW);
+                    //ROS_INFO("Year: %u", rtcm_reader.gpsData.year);
+                    //ROS_INFO("Month: %u", rtcm_reader.gpsData.month);
+                    //ROS_INFO("Day: %u", rtcm_reader.gpsData.day);
+                    //ROS_INFO("Hour: %u", rtcm_reader.gpsData.hour);
+                    //ROS_INFO("Minute: %u", rtcm_reader.gpsData.min);
+                    //ROS_INFO("Second: %u", rtcm_reader.gpsData.sec);
+                    //ROS_INFO("Validity Flags: %u", rtcm_reader.gpsData.valid);
+                    //ROS_INFO("Time Accuracy: %uns", rtcm_reader.gpsData.tAcc);
+                    //ROS_INFO("Fix Type: %u", rtcm_reader.gpsData.fixType);
+                    //ROS_INFO("Number of satellites in Nav Solution: %u", rtcm_reader.gpsData.numSV);
+                    //ROS_INFO("Latitude: %f", rtcm_reader.gpsData.lat / 10000000.0);
+                    //ROS_INFO("Longitude: %f", rtcm_reader.gpsData.lon / 10000000.0);
+                    //ROS_INFO("Height above ellipsoid: %f m", rtcm_reader.gpsData.height / 1000);
+                    //ROS_INFO("Height above mean sea level: %f m", rtcm_reader.gpsData.hMSL / 1000);
+                    //ROS_INFO("Horizontal accuracy estimate: %f m", rtcm_reader.gpsData.hAcc / 1000);
+                    //ROS_INFO("Vertical accuracy estimate: %f m", rtcm_reader.gpsData.vAcc / 1000);
+                    //ROS_INFO("Position DOP: %f m", rtcm_reader.gpsData.pDOP / 100);
+                    //ROS_INFO("Magnetic declination: %f m", rtcm_reader.gpsData.magDec / 100);
+                    //ROS_INFO("Magnetic declination accuracy: %f m", rtcm_reader.gpsData.magDecAcc / 100);
+                    continue;
+                }
+            }
+            if (rtcm_reader.is_rtcm_message(bufor)) {
+                uint32_t messagePayloadSize = (((uint32_t)bufor[1] & 3) << 8) + ((uint32_t)bufor[2] << 0) + 6; // Header + CRC bytes
+                if (messagePayloadSize != num_bytes) { continue; }
+                uint16_t rtcmMessageType = ((uint16_t)bufor[3] << 4) + ((uint16_t)bufor[4] >> 4); // 12-bit (0..4095)
+                ROS_INFO("RTCM3 frame %4d received, length: %4d", rtcmMessageType, messagePayloadSize);
+                if (rtcmMessageType == 1005) {
+                    rtcm_reader.setRtcmData(std::vector<uint8_t>(bufor.begin(), bufor.begin() + num_bytes));
+                }
+            }
             std::fill(bufor.begin(), bufor.end(), 0xFF);
         }
+        rtcm_reader.setRtcmData(std::vector<uint8_t>(bufor.begin(), bufor.begin() + 1));
     });
 
     // Print content of Ublox message, for debug
     auto rtcm3_printer = std::thread([&rtcm_reader] {
-        std::string byteString;
-        std::stringstream ss;
-        while (true)
-        {
-            byteString = "";
-            auto rtcm3_1005_msg = rtcm_reader.get_1005();
-            std::string byte_string = "";
-            for (const auto& byte : rtcm3_1005_msg)
-            {
-                ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
-                byteString += ss.str() + " ";
-                //printf("%x ", byte);
-            }
-            ROS_INFO("Received RTCM3 frame:\n%s", byte_string.c_str());
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        ros::NodeHandle nh = ros::NodeHandle("ublox_rtk_base_driver");
+        ros::Publisher rtcmPublisher = nh.advertise<rtcm_msgs::Message>("/rtcm", 1, true);
+        std::vector<uint8_t> rtcmMessage;
+        uint32_t messagePayloadSize = 0;
+        uint16_t rtcmMessageType = 0;
+        while (ros::ok()) {
+            rtcm_msgs::Message rtcmRosMsg;
+            rtcmRosMsg.header.stamp = ros::Time::now();  // Timestamp
+            rtcmRosMsg.header.frame_id = "map";  // Frame ID
+            rtcmMessage = rtcm_reader.getRtcmData();
+            messagePayloadSize = (((uint32_t)rtcmMessage[1] & 3) << 8) + ((uint32_t)rtcmMessage[2] << 0) + 6;
+            rtcmMessageType = ((uint16_t)rtcmMessage[3] << 4) + ((uint16_t)rtcmMessage[4] >> 4); // 12-bit (0..4095)
+            // copy message bytes into ROS message
+            rtcmRosMsg.message.insert(rtcmRosMsg.message.end(), rtcmMessage.begin(), rtcmMessage.end());
+            rtcmPublisher.publish(rtcmRosMsg);
         }
     });
+
     while(ros::ok()) {
         ros::spinOnce();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     rtcm_reader.close_serial_port();
     usb_thread.join();
