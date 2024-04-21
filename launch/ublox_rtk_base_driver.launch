@@ -1,0 +1,3 @@
+<launch>
+  <node name="ublox_rtk_base_driver" pkg="ublox_driver" type="ublox_driver" output="screen" respawn="true" />
+</launch>
