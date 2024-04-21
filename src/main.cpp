@@ -63,7 +63,7 @@ auto main(int argc, char** argv) -> int {
     ROS_INFO("Started ublox rtcm driver node.");
 
     UbloxRtcmDriver rtcm_reader;
-    rtcm_reader.initialize_serial_port("/dev/ttyACM1");
+    rtcm_reader.initialize_serial_port("/dev/ttyACM0");
 
     auto usb_thread = std::thread([&] {
         ros::NodeHandle nh = ros::NodeHandle("ublox_rtk_base_driver");
